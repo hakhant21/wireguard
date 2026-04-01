@@ -59,7 +59,7 @@ wgx add USERNAME
 wgx remove USERNAME
 wgx list
 wgx show USERNAME
-wgx backup [NAME]
+wgx backup USERNAME
 ```
 
 ### Usage examples
