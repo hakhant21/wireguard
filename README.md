@@ -91,7 +91,7 @@ wgx remove alice
 Create manual backup:
 
 ```bash
-wgx backup manual
+wgx backup alice
 ```
 
 ## Important file locations
