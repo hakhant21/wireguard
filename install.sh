@@ -103,7 +103,7 @@ cat > /usr/local/etc/xray/config.json <<EOF
         "network": "grpc",
         "security": "reality",
         "realitySettings": {
-          "dest": "www.sixthkendra.com",
+          "dest": "www.google.com:443",
           "serverNames": [
             "www.sixthkendra.com",
             "www.google.com",
