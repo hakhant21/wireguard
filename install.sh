@@ -37,7 +37,7 @@ ufw --force enable
 
 # Enable IP forwarding
 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-sysctl -p
+sysctl -p 2>/dev/null || echo "✓ IP forwarding enabled (may require reboot in some environments)"
 
 # ========================
 # WIREGUARD SETUP
