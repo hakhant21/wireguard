@@ -225,7 +225,7 @@ net.ipv4.tcp_tw_reuse=1
 EOF
 
 # Apply settings silently
-sysctl -p > /dev/null
+sysctl -p 2>/dev/null
 # ========================
 # VERIFICATION
 # ========================
