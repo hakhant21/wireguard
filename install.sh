@@ -30,7 +30,7 @@ fi
 # ========================
 # BASE SETUP (PRESERVE NETBIRD)
 # ========================
-apt install -y wireguard curl iptables jq qrencode ufw fail2ban
+apt install -y wireguard curl iptables jq qrencode ufw fail2ban unzip
 
 # Create directories with proper permissions
 mkdir -p "$DB_DIR" "$BACKUP_DIR"
@@ -113,8 +113,9 @@ systemctl start wg-quick@wg0
 # ========================
 # XRAY INSTALL (NO CHANGES NEEDED)
 # ========================
-bash <(curl -sL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh) install
+wget https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh -O xray-install.sh
 
+bash xray-install.sh --install-only
 # Generate XRAY keys
 KEYS=$(/usr/local/bin/xray x25519)
 XRAY_PRIV=$(echo "$KEYS" | grep Private | awk '{print $3}')
@@ -215,21 +216,14 @@ chmod 640 "$DB_DIR/users.db"
 # SYSTEM OPTIMIZATION (NO CONFLICT)
 # ========================
 cat >> /etc/sysctl.conf <<EOF
-# Network optimization (safe with Netbird)
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-net.core.rmem_default=262144
-net.core.wmem_default=262144
-net.core.rmem_max=16777216
-net.core.wmem_max=16777216
 net.ipv4.tcp_rmem=4096 87380 16777216
 net.ipv4.tcp_wmem=4096 65536 16777216
 net.ipv4.tcp_syncookies=1
 net.ipv4.tcp_tw_reuse=1
 EOF
 
-sysctl -p
-
+# Apply settings silently
+sysctl -p > /dev/null
 # ========================
 # VERIFICATION
 # ========================
