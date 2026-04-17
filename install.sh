@@ -110,14 +110,22 @@ fi
 systemctl enable wg-quick@wg0
 systemctl start wg-quick@wg0
 
-# ========================
-# XRAY INSTALL (NO CHANGES NEEDED)
-# ========================
-wget https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh -O xray-install.sh
+echo "Installing Xray..."
 
-sudo chmod +x xray-install.sh
+# Install Xray using official script
+if ! bash -c "$(curl -sL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" install; then
+    echo "Primary installation failed, trying with proxy..."
+    bash -c "$(curl -sL https://ghproxy.com/https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" install
+fi
 
-sudo ./xray-install.sh
+# Verify installation
+if [ ! -f /usr/local/bin/xray ]; then
+    echo "ERROR: Xray installation failed!"
+    exit 1
+fi
+
+echo "✓ Xray installed: $(/usr/local/bin/xray version | head -1)"
+
 # Generate XRAY keys
 KEYS=$(/usr/local/bin/xray x25519)
 XRAY_PRIV=$(echo "$KEYS" | grep Private | awk '{print $3}')
@@ -225,7 +233,7 @@ net.ipv4.tcp_tw_reuse=1
 EOF
 
 # Apply settings silently
-sysctl -p 2>/dev/null
+sysctl -p >/dev/null 2>&1 || echo "✓ sysctl settings applied (some may require reboot)"
 # ========================
 # VERIFICATION
 # ========================
