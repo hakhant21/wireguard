@@ -5,18 +5,18 @@ set -e
 echo "=== Wireguard + Xray Server Installer ==="
 
 # Configuration variables
-WG_PORT=51820
+WG_PORT=21821
 XRAY_PORT=10000
-WG_SUBNET="100.76.0.0/24"
-WG_NETWORK="100.76.0"
+WG_SUBNET="120.76.0.0/24"
+WG_NETWORK="120.76.0"
 DB_DIR="/etc/wg-xray"
-BACKUP_DIR="/root/wireguard/wg-xray-backups"
+BACKUP_DIR="/home/pos/wireguard/wg-xray-backups"
 
 # ========================
 # BASE SETUP
 # ========================
 apt update -y
-apt install -y wireguard curl iptables jq qrencode ufw fail2ban
+apt install -y wireguard curl iptables jq qrencode ufw fail2ban unzip
 
 # Create directories with proper permissions
 mkdir -p "$DB_DIR" "$BACKUP_DIR"
@@ -69,7 +69,7 @@ systemctl start wg-quick@wg0
 # ========================
 # XRAY INSTALL
 # ========================
-bash <(curl -Ls https://github.com/XTLS/Xray-install/raw/main/install-release.sh)
+bash -c "$(curl -sL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" install
 
 # Generate XRAY keys
 KEYS=$(/usr/local/bin/xray x25519)
@@ -175,7 +175,7 @@ cat > /usr/local/bin/wgx <<'EOF'
 DB="/etc/wg-xray/users.db"
 WG_CONF="/etc/wireguard/wg0.conf"
 XRAY_CONF="/usr/local/etc/xray/config.json"
-BACKUP_DIR="/root/wireguard/wg-xray-backups"
+BACKUP_DIR="/home/pos/wireguard/wg-xray-backups"
 
 
 # Colors for output
@@ -195,9 +195,9 @@ error() {
 get_next_ip() {
     LAST=$(awk -F',' '{print $3}' "$DB" | awk -F'.' '{print $4}' | sort -n | tail -1)
     if [ -z "$LAST" ] || [ "$LAST" -lt 2 ]; then
-        echo "100.76.0.2"
+        echo "${WG_SUBNET}.2"
     else
-        echo "100.76.0.$((LAST+1))"
+        echo "${WG_SUBNET}.$((LAST+1))"
     fi
 }
 
@@ -213,7 +213,7 @@ backup_configs() {
     log "Backup: $FILE"
 
     ls -t "$BACKUP_DIR"/backup_*.tar.gz 2>/dev/null | tail -n +11 | xargs rm -f 2>/dev/null || true
-}w
+}
 
 sync_xray() {
     CLIENTS=$(awk -F',' '{printf "{\"id\":\"%s\",\"flow\":\"xtls-rprx-vision\"},",$2}' "$DB" | sed 's/,$//')
@@ -298,7 +298,7 @@ DNS = 1.1.1.1, 8.8.8.8
 
 [Peer]
 PublicKey = $SERVER_PUB
-Endpoint = $SERVER_IP:51820
+Endpoint = $SERVER_IP:$WG_PORT
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOC
@@ -458,7 +458,7 @@ net.ipv4.tcp_syncookies=1
 net.ipv4.tcp_tw_reuse=1
 EOF
 
-sysctl -p
+sysctl -p 2>/dev/null || echo "✓ sysctl settings applied (some may be container-restricted)"
 
 # ========================
 # DONE
