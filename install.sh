@@ -115,7 +115,7 @@ systemctl start wg-quick@wg0
 # ========================
 wget https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh -O xray-install.sh
 
-bash xray-install.sh --install-only
+./xray-install.sh --install
 # Generate XRAY keys
 KEYS=$(/usr/local/bin/xray x25519)
 XRAY_PRIV=$(echo "$KEYS" | grep Private | awk '{print $3}')
