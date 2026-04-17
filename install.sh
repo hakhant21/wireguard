@@ -5,12 +5,31 @@ set -e
 echo "=== Wireguard + Xray Server Installer (Netbird Docker Compatible) ==="
 
 # Configuration variables
-WG_PORT=21821  # Different from Netbird's default 51820
+WG_PORT=21821
 XRAY_PORT=10000
 WG_SUBNET="120.76.0.0/24"
 WG_NETWORK="120.76.0"
 DB_DIR="/etc/wg-xray"
 BACKUP_DIR="/home/pos/wireguard/wg-xray-backups"
+UNINSTALL_SCRIPT="/usr/local/bin/wgx-uninstall"
+
+# ========================
+# CHECK FOR EXISTING INSTALLATION
+# ========================
+if [ -f "$DB_DIR/.installed" ]; then
+    echo "⚠️ Existing installation detected!"
+    echo "To uninstall, run: sudo wgx-uninstall"
+    echo "Or continue with reinstall (will backup old config)"
+    read -p "Continue with reinstall? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+    # Backup old installation
+    BACKUP_FILE="/tmp/wg-xray-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+    tar -czf "$BACKUP_FILE" "$DB_DIR" /etc/wireguard /usr/local/etc/xray 2>/dev/null || true
+    echo "✓ Old configuration backed up to $BACKUP_FILE"
+fi
 
 # ========================
 # DETECT NETBIRD IN DOCKER
@@ -19,23 +38,19 @@ NETBIRD_ACTIVE=false
 NETBIRD_INTERFACE=""
 NETBIRD_NETWORK=""
 
-# Check for Netbird Docker container
 if docker ps --format "table {{.Names}}" 2>/dev/null | grep -q "netbird"; then
     echo "✓ Netbird Docker container detected"
     NETBIRD_ACTIVE=true
     
-    # Get Netbird interface name
     if ip link show | grep -q "netbird"; then
         NETBIRD_INTERFACE="netbird"
     elif ip link show | grep -q "wt0"; then
         NETBIRD_INTERFACE="wt0"
     fi
     
-    # Get Netbird network IP range
     if [ -n "$NETBIRD_INTERFACE" ]; then
         NETBIRD_NETWORK=$(ip addr show $NETBIRD_INTERFACE 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | head -1)
         echo "✓ Netbird interface: $NETBIRD_INTERFACE"
-        echo "✓ Netbird network: $NETBIRD_NETWORK"
     fi
 fi
 
@@ -51,29 +66,27 @@ chmod 750 "$DB_DIR"
 chmod 755 "$BACKUP_DIR"
 chown -R pos:pos "/home/pos/wireguard" 2>/dev/null || true
 
-# Detect physical network interface (exclude virtual/docker interfaces)
+# Detect physical network interface
 IFACE=$(ip route | grep default | grep -v "docker\|br-\|veth\|netbird\|wg0\|wt0" | awk '{print $5}' | head -1)
 echo "Detected physical interface: $IFACE"
 
 # ========================
-# FIREWALL SETUP (PRESERVE NETBIRD)
+# FIREWALL SETUP
 # ========================
 if [ "$NETBIRD_ACTIVE" = true ]; then
     echo "Netbird detected - preserving existing UFW rules"
-    # Don't reset, just ensure UFW is enabled
     ufw status > /dev/null 2>&1 || ufw --force enable
 else
     ufw --force reset
 fi
 
-# Configure UFW
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow ssh
 ufw allow "$WG_PORT"/udp
 ufw allow "$XRAY_PORT"/tcp
 
-# Critical: Fix UFW forwarding policy (required for WireGuard RX)
+# Fix UFW forwarding policy
 sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/g' /etc/default/ufw
 ufw --force enable
 
@@ -89,9 +102,8 @@ fi
 sysctl -p 2>/dev/null || echo "✓ IP forwarding enabled"
 
 # ========================
-# WIREGUARD SETUP (WITH NETBIRD COMPATIBILITY)
+# WIREGUARD SETUP
 # ========================
-# Remove old config if exists
 rm -f /etc/wireguard/wg0.conf 2>/dev/null
 
 wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
@@ -100,7 +112,6 @@ chmod 600 /etc/wireguard/server_private.key
 SERVER_PRIV=$(cat /etc/wireguard/server_private.key)
 SERVER_PUB=$(cat /etc/wireguard/server_public.key)
 
-# Build WireGuard config with Netbird compatibility
 cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
 PrivateKey = $SERVER_PRIV
@@ -108,25 +119,18 @@ Address = ${WG_SUBNET%.*}.1/24
 ListenPort = $WG_PORT
 MTU = 1420
 
-# Ensure IP forwarding
 PostUp = sysctl -w net.ipv4.ip_forward=1
 PostUp = sysctl -w net.ipv6.conf.all.forwarding=1
-
-# Basic iptables rules for WireGuard
 PostUp = iptables -P FORWARD ACCEPT
 PostUp = iptables -A FORWARD -i wg0 -j ACCEPT
 PostUp = iptables -A FORWARD -o wg0 -j ACCEPT
 PostUp = iptables -A FORWARD -i wg0 -o wg0 -j ACCEPT
-
-# NAT/MASQUERADE for internet access
 PostUp = iptables -t nat -A POSTROUTING -o $IFACE -j MASQUERADE
 
 EOF
 
-# Add Netbird-specific rules if detected
 if [ "$NETBIRD_ACTIVE" = true ] && [ -n "$NETBIRD_INTERFACE" ]; then
     cat >> /etc/wireguard/wg0.conf <<EOF
-# Netbird Docker compatibility rules
 PostUp = iptables -A FORWARD -i wg0 -o $NETBIRD_INTERFACE -j ACCEPT
 PostUp = iptables -A FORWARD -i $NETBIRD_INTERFACE -o wg0 -j ACCEPT
 PostUp = iptables -t nat -A POSTROUTING -o $NETBIRD_INTERFACE -j MASQUERADE
@@ -135,45 +139,26 @@ PostDown = iptables -D FORWARD -i wg0 -o $NETBIRD_INTERFACE -j ACCEPT
 PostDown = iptables -D FORWARD -i $NETBIRD_INTERFACE -o wg0 -j ACCEPT
 PostDown = iptables -t nat -D POSTROUTING -o $NETBIRD_INTERFACE -j MASQUERADE
 EOF
-    echo "✓ Added Netbird Docker compatibility rules"
 fi
 
-# Add cleanup rules
 cat >> /etc/wireguard/wg0.conf <<EOF
-# Cleanup rules
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT
 PostDown = iptables -D FORWARD -o wg0 -j ACCEPT
 PostDown = iptables -D FORWARD -i wg0 -o wg0 -j ACCEPT
 PostDown = iptables -t nat -D POSTROUTING -o $IFACE -j MASQUERADE
 EOF
 
-# Start WireGuard
 systemctl enable wg-quick@wg0
 systemctl stop wg-quick@wg0 2>/dev/null
 systemctl start wg-quick@wg0
 
-# Wait for interface
 sleep 3
 
-# Verify and fix iptables rules if needed
 if systemctl is-active --quiet wg-quick@wg0; then
-    echo "✓ WireGuard is running"
-    
-    # Double-check iptables rules
-    if ! iptables -L FORWARD -n 2>/dev/null | grep -q "wg0.*ACCEPT"; then
-        iptables -A FORWARD -i wg0 -j ACCEPT
-        iptables -A FORWARD -o wg0 -j ACCEPT
-    fi
-    
-    if ! iptables -t nat -L POSTROUTING -n 2>/dev/null | grep -q "MASQUERADE.*$IFACE"; then
-        iptables -t nat -A POSTROUTING -o $IFACE -j MASQUERADE
-    fi
-    
-    # Show WireGuard status
-    wg show
+    echo "✓ WireGuard running"
 else
-    echo "⚠️ WireGuard failed to start, checking logs..."
-    journalctl -u wg-quick@wg0 -n 10 --no-pager
+    echo "⚠️ WireGuard failed to start"
+    journalctl -u wg-quick@wg0 -n 5 --no-pager
 fi
 
 # ========================
@@ -181,20 +166,15 @@ fi
 # ========================
 bash -c "$(curl -sL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" install
 
-# Generate XRAY keys
 KEYS=$(/usr/local/bin/xray x25519)
 XRAY_PRIV=$(echo "$KEYS" | grep Private | awk '{print $3}')
 XRAY_PUB=$(echo "$KEYS" | grep Public | awk '{print $3}')
 
-# Save keys with proper permissions
 echo "$XRAY_PUB" > "$DB_DIR/xray_public.key"
 echo "$XRAY_PRIV" > "$DB_DIR/xray_private.key"
 chmod 600 "$DB_DIR/xray_private.key"
 chmod 644 "$DB_DIR/xray_public.key"
 
-# ========================
-# XRAY CONFIG
-# ========================
 cat > /usr/local/etc/xray/config.json <<EOF
 {
   "log": {
@@ -257,7 +237,6 @@ cat > /usr/local/etc/xray/config.json <<EOF
 }
 EOF
 
-# Create log directory with proper permissions
 mkdir -p /var/log/xray
 touch /var/log/xray/access.log /var/log/xray/error.log
 
@@ -276,8 +255,11 @@ systemctl restart xray
 touch "$DB_DIR/users.db"
 chmod 644 "$DB_DIR/users.db"
 
+# Mark as installed
+echo "$(date)" > "$DB_DIR/.installed"
+
 # ========================
-# CLI TOOL (WITH NETBIRD DOCKER SUPPORT)
+# CLI TOOL
 # ========================
 cat > /usr/local/bin/wgx <<'EOF'
 #!/bin/bash
@@ -287,13 +269,11 @@ WG_CONF="/etc/wireguard/wg0.conf"
 XRAY_CONF="/usr/local/etc/xray/config.json"
 BACKUP_DIR="/home/pos/wireguard/wg-xray-backups"
 
-# Check if running as root, if not use sudo
 USE_SUDO=""
 if [ "$EUID" -ne 0 ]; then
     USE_SUDO="sudo"
 fi
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -327,7 +307,6 @@ backup_configs() {
     mkdir -p "$BACKUP_DIR"
     $USE_SUDO tar -czf "$FILE" "$WG_CONF" "$XRAY_CONF" "$DB" 2>/dev/null || true
     log "Backup: $FILE"
-    $USE_SUDO ls -t "$BACKUP_DIR"/backup_*.tar.gz 2>/dev/null | tail -n +11 | xargs rm -f 2>/dev/null || true
 }
 
 sync_xray() {
@@ -397,7 +376,6 @@ add_user() {
     
     $USE_SUDO bash -c "echo \"$USER,$UUID,$IP,$PUB\" >> \"$DB\""
     
-    # Add WireGuard peer
     $USE_SUDO bash -c "cat >> \"$WG_CONF\" <<EOC
 
 [Peer]
@@ -416,7 +394,7 @@ EOC"
 PrivateKey = $PRIV
 Address = $IP/24
 DNS = 1.1.1.1, 8.8.8.8
-MTU = 1420
+MTU = 1300
 
 [Peer]
 PublicKey = $SERVER_PUB
@@ -565,15 +543,119 @@ EOF
 
 chmod +x /usr/local/bin/wgx
 
-# Add pos user to sudoers for wgx commands
+# Add pos user to sudoers
 echo "pos ALL=(ALL) NOPASSWD: /usr/local/bin/wgx" >> /etc/sudoers.d/wgx
 chmod 440 /etc/sudoers.d/wgx
 
 # ========================
-# SYSTEM OPTIMIZATION (LXC/DOCKER FRIENDLY)
+# CREATE UNINSTALL SCRIPT
+# ========================
+cat > "$UNINSTALL_SCRIPT" <<'EOF'
+#!/bin/bash
+
+echo "=== WireGuard + Xray Uninstaller ==="
+echo ""
+echo "This will remove:"
+echo "  • WireGuard configuration"
+echo "  • Xray configuration"
+echo "  • User database"
+echo "  • Firewall rules"
+echo "  • iptables rules"
+echo ""
+echo "Netbird Docker container will NOT be affected."
+echo ""
+read -p "Are you sure? (y/N): " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Uninstall cancelled."
+    exit 0
+fi
+
+echo ""
+echo "=== Creating backup ==="
+BACKUP_FILE="/tmp/wg-xray-final-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+tar -czf "$BACKUP_FILE" /etc/wireguard /usr/local/etc/xray /etc/wg-xray 2>/dev/null || true
+echo "✓ Backup saved to $BACKUP_FILE"
+
+echo ""
+echo "=== Stopping services ==="
+systemctl stop wg-quick@wg0 2>/dev/null && echo "✓ WireGuard stopped"
+systemctl stop xray 2>/dev/null && echo "✓ Xray stopped"
+systemctl disable wg-quick@wg0 2>/dev/null
+systemctl disable xray 2>/dev/null
+
+echo ""
+echo "=== Removing WireGuard ==="
+ip link del wg0 2>/dev/null && echo "✓ WireGuard interface removed"
+rm -rf /etc/wireguard 2>/dev/null && echo "✓ WireGuard config removed"
+
+echo ""
+echo "=== Removing Xray ==="
+bash -c "$(curl -sL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" remove 2>/dev/null || true
+rm -rf /usr/local/etc/xray 2>/dev/null
+rm -rf /var/log/xray 2>/dev/null
+rm -f /usr/local/bin/xray 2>/dev/null
+echo "✓ Xray removed"
+
+echo ""
+echo "=== Removing configuration files ==="
+rm -rf /etc/wg-xray 2>/dev/null && echo "✓ User database removed"
+rm -rf /home/pos/wireguard/wg-xray-backups 2>/dev/null && echo "✓ Backups removed"
+rm -f /usr/local/bin/wgx 2>/dev/null && echo "✓ wgx command removed"
+rm -f /etc/sudoers.d/wgx 2>/dev/null
+
+echo ""
+echo "=== Cleaning iptables rules ==="
+# Remove WireGuard related iptables rules
+iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null
+iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null
+iptables -D FORWARD -i wg0 -o wg0 -j ACCEPT 2>/dev/null
+iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null
+
+# Remove Netbird related rules if they exist
+iptables -D FORWARD -i wg0 -o netbird -j ACCEPT 2>/dev/null
+iptables -D FORWARD -i netbird -o wg0 -j ACCEPT 2>/dev/null
+iptables -D FORWARD -i wg0 -o wt0 -j ACCEPT 2>/dev/null
+iptables -D FORWARD -i wt0 -o wg0 -j ACCEPT 2>/dev/null
+
+echo "✓ iptables rules cleaned"
+
+echo ""
+echo "=== Restoring UFW defaults ==="
+ufw --force reset 2>/dev/null || true
+ufw default deny incoming 2>/dev/null
+ufw default allow outgoing 2>/dev/null
+ufw allow ssh 2>/dev/null
+ufw --force enable 2>/dev/null || true
+echo "✓ UFW reset to defaults (SSH allowed)"
+
+echo ""
+echo "=== Removing sysctl additions ==="
+sed -i '/net.ipv4.ip_forward=1/d' /etc/sysctl.conf
+sed -i '/net.ipv6.conf.all.forwarding=1/d' /etc/sysctl.conf
+sed -i '/net.ipv4.tcp_rmem=4096 87380 16777216/d' /etc/sysctl.conf
+sed -i '/net.ipv4.tcp_wmem=4096 65536 16777216/d' /etc/sysctl.conf
+sed -i '/net.ipv4.tcp_syncookies=1/d' /etc/sysctl.conf
+sed -i '/net.ipv4.tcp_tw_reuse=1/d' /etc/sysctl.conf
+echo "✓ sysctl cleaned"
+
+echo ""
+echo "=== Uninstall Complete ==="
+echo ""
+echo "WireGuard and Xray have been removed."
+echo "Netbird Docker container was NOT affected."
+echo ""
+echo "Backup saved to: $BACKUP_FILE"
+echo ""
+echo "To reinstall, run the original installer script."
+EOF
+
+chmod +x "$UNINSTALL_SCRIPT"
+
+# ========================
+# SYSTEM OPTIMIZATION
 # ========================
 cat >> /etc/sysctl.conf <<EOF
-# Network optimization (safe for containers)
 net.ipv4.tcp_rmem=4096 87380 16777216
 net.ipv4.tcp_wmem=4096 65536 16777216
 net.ipv4.tcp_syncookies=1
@@ -604,17 +686,11 @@ systemctl is-active xray && echo "✓ Running" || echo "✗ Failed"
 if [ "$NETBIRD_ACTIVE" = true ]; then
     echo -n "Netbird Docker: "
     docker ps --format "table {{.Names}}" 2>/dev/null | grep -q netbird && echo "✓ Running" || echo "⚠️ Not detected"
-    echo -n "Netbird Interface: "
-    ip link show | grep -q "netbird\|wt0" && echo "✓ Present" || echo "⚠️ Not found"
 fi
 
 echo ""
 echo "WireGuard Interface Status:"
 wg show 2>/dev/null || echo "  No peers yet"
-
-echo ""
-echo "Firewall Forward Policy:"
-grep DEFAULT_FORWARD_POLICY /etc/default/ufw
 
 # ========================
 # DONE
@@ -624,7 +700,7 @@ SERVER_IP=$(curl -s ifconfig.me)
 echo ""
 echo "=== INSTALL COMPLETE ==="
 echo "Server IP: $SERVER_IP"
-echo "WireGuard Port: $WG_PORT (Netbird uses 51820 - no conflict)"
+echo "WireGuard Port: $WG_PORT"
 echo "XRAY Port: $XRAY_PORT"
 echo ""
 echo "Commands (run as pos user):"
@@ -633,19 +709,12 @@ echo "  wgx list             - List all users"
 echo "  wgx show username    - Show user details and QR codes"
 echo "  wgx remove username  - Remove user"
 echo ""
+echo "To UNINSTALL everything:"
+echo "  sudo wgx-uninstall"
+echo ""
 echo "Configuration files:"
 echo "  WireGuard: /etc/wireguard/wg0.conf"
 echo "  XRAY: /usr/local/etc/xray/config.json"
 echo "  Users DB: /etc/wg-xray/users.db"
 echo "  Backups: $BACKUP_DIR"
-echo ""
-if [ "$NETBIRD_ACTIVE" = true ]; then
-    echo "⚠️  Netbird Docker Container Detected:"
-    echo "   • WireGuard uses port $WG_PORT (different from Netbird's 51820)"
-    echo "   • Both VPNs can run simultaneously"
-    echo "   • Traffic can route between WireGuard and Netbird if needed"
-    echo ""
-    echo "To check Netbird status:"
-    echo "  docker ps | grep netbird"
-    echo "  docker logs netbird"
-fi
+echo "  Uninstaller: $UNINSTALL_SCRIPT"
