@@ -30,7 +30,6 @@ fi
 # ========================
 # BASE SETUP (PRESERVE NETBIRD)
 # ========================
-apt update -y
 apt install -y wireguard curl iptables jq qrencode ufw fail2ban
 
 # Create directories with proper permissions
