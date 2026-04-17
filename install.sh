@@ -113,7 +113,7 @@ systemctl start wg-quick@wg0
 # ========================
 # XRAY INSTALL (NO CHANGES NEEDED)
 # ========================
-bash -c "$(curl -Ls https://ghproxy.com/https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" @ install
+bash <(curl -sL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh) install
 
 # Generate XRAY keys
 KEYS=$(/usr/local/bin/xray x25519)
