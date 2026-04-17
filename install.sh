@@ -9,6 +9,8 @@ WG_PORT=21821
 XRAY_PORT=10000
 WG_SUBNET="120.76.0.0/24"
 WG_NETWORK="120.76.0"
+WG_SUBNET="120.76.0.0/24"
+WG_NETWORK="120.76.0"
 DB_DIR="/etc/wg-xray"
 BACKUP_DIR="/home/pos/wireguard/wg-xray-backups"
 UNINSTALL_SCRIPT="/usr/local/bin/wgx-uninstall"
@@ -55,7 +57,7 @@ if docker ps --format "table {{.Names}}" 2>/dev/null | grep -q "netbird"; then
 fi
 
 # ========================
-# BASE SETUP
+# CHECK FOR NETBIRD CONFLICTS
 # ========================
 apt update -y
 apt install -y wireguard curl iptables jq qrencode ufw fail2ban unzip
@@ -82,6 +84,8 @@ fi
 
 ufw default deny incoming
 ufw default allow outgoing
+
+# Add rules (without resetting)
 ufw allow ssh
 ufw allow "$WG_PORT"/udp
 ufw allow "$XRAY_PORT"/tcp
@@ -102,7 +106,7 @@ fi
 sysctl -p 2>/dev/null || echo "✓ IP forwarding enabled"
 
 # ========================
-# WIREGUARD SETUP
+# WIREGUARD SETUP (NO MASQUERADE CONFLICT)
 # ========================
 rm -f /etc/wireguard/wg0.conf 2>/dev/null
 
@@ -112,6 +116,7 @@ chmod 600 /etc/wireguard/server_private.key
 SERVER_PRIV=$(cat /etc/wireguard/server_private.key)
 SERVER_PUB=$(cat /etc/wireguard/server_public.key)
 
+# Create WireGuard config WITHOUT MASQUERADE (Netbird handles this)
 cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
 PrivateKey = $SERVER_PRIV
@@ -250,7 +255,7 @@ systemctl enable xray
 systemctl restart xray
 
 # ========================
-# USER DATABASE
+# USER DATABASE & CLI TOOL
 # ========================
 touch "$DB_DIR/users.db"
 chmod 644 "$DB_DIR/users.db"
@@ -653,7 +658,7 @@ EOF
 chmod +x "$UNINSTALL_SCRIPT"
 
 # ========================
-# SYSTEM OPTIMIZATION
+# SYSTEM OPTIMIZATION (NO CONFLICT)
 # ========================
 cat >> /etc/sysctl.conf <<EOF
 net.ipv4.tcp_rmem=4096 87380 16777216
@@ -698,9 +703,9 @@ wg show 2>/dev/null || echo "  No peers yet"
 SERVER_IP=$(curl -s ifconfig.me)
 
 echo ""
-echo "=== INSTALL COMPLETE ==="
+echo "=== INSTALL COMPLETE (Netbird Compatible) ==="
 echo "Server IP: $SERVER_IP"
-echo "WireGuard Port: $WG_PORT"
+echo "WireGuard Port: $WG_PORT (Netbird uses 51820 - no conflict)"
 echo "XRAY Port: $XRAY_PORT"
 echo ""
 echo "Commands (run as pos user):"
