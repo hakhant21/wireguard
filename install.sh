@@ -43,7 +43,7 @@ fi
 # BASE SETUP
 # ========================
 apt update -y
-apt install -y wireguard curl iptables jq qrencode ufw fail2ban unzip docker.io
+apt install -y wireguard curl iptables jq qrencode ufw fail2ban unzip
 
 # Create directories with proper permissions
 mkdir -p "$DB_DIR" "$BACKUP_DIR"
