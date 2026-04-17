@@ -117,7 +117,7 @@ wget https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh
 
 sudo chmod +x xray-install.sh
 
-sudo ./xray-install.sh --install
+sudo ./xray-install.sh
 # Generate XRAY keys
 KEYS=$(/usr/local/bin/xray x25519)
 XRAY_PRIV=$(echo "$KEYS" | grep Private | awk '{print $3}')
