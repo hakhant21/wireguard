@@ -59,10 +59,8 @@ Address = ${WG_SUBNET%.*}.1/24
 ListenPort = $WG_PORT
 
 PostUp = sysctl -w net.ipv4.ip_forward=1
-PostUp = iptables -t nat -A POSTROUTING -o $IFACE -j MASQUERADE
 PostUp = iptables -A FORWARD -i wg0 -j ACCEPT
 PostUp = iptables -A FORWARD -o wg0 -j ACCEPT
-PostDown = iptables -t nat -D POSTROUTING -o $IFACE -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT
 PostDown = iptables -D FORWARD -o wg0 -j ACCEPT
 EOF
