@@ -416,7 +416,7 @@ EOC"
 PrivateKey = $PRIV
 Address = $IP/24
 DNS = 1.1.1.1, 8.8.8.8
-MTU = 1300
+MTU = 1420
 
 [Peer]
 PublicKey = $SERVER_PUB
