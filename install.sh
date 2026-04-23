@@ -10,7 +10,7 @@ XRAY_PORT=10000
 WG_SUBNET="120.76.0.0/24"
 WG_NETWORK="120.76.0"
 DB_DIR="/etc/wg-xray"
-BACKUP_DIR="/home/pos/wireguard/wg-xray-backups"
+BACKUP_DIR="/root/wireguard/wg-xray-backups"
 UNINSTALL_SCRIPT="/usr/local/bin/wgx-uninstall"
 
 # ========================
