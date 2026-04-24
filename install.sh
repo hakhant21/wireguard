@@ -202,6 +202,8 @@ echo "$XRAY_PRIV" > "$DB_DIR/xray_private.key"
 chmod 600 "$DB_DIR/xray_private.key"
 chmod 644 "$DB_DIR/xray_public.key"
 
+mkdir -p /usr/local/etc/xray
+
 cat > /usr/local/etc/xray/config.json <<EOF
 {
   "log": {
