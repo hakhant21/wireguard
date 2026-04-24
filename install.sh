@@ -232,8 +232,7 @@ cat > /usr/local/etc/xray/config.json <<EOF
           "shortIds": ["6ba85179e30d4fc2"]
         },
         "grpcSettings": {
-          "serviceName": "grpc",
-          "multiMode": true
+          "serviceName": "grpc"
         }
       },
       "sniffing": {
