@@ -267,15 +267,20 @@ XRAY_SERVICE_USER=$(systemctl show -p User --value xray 2>/dev/null || true)
 XRAY_SERVICE_GROUP=$(systemctl show -p Group --value xray 2>/dev/null || true)
 
 if [ -z "$XRAY_SERVICE_USER" ]; then
-    XRAY_SERVICE_USER="xray"
+    XRAY_SERVICE_USER="root"
 fi
 if [ -z "$XRAY_SERVICE_GROUP" ]; then
     XRAY_SERVICE_GROUP="$XRAY_SERVICE_USER"
 fi
 
 if ! id "$XRAY_SERVICE_USER" >/dev/null 2>&1; then
-    XRAY_SERVICE_USER="nobody"
-    XRAY_SERVICE_GROUP=$(id -gn nobody 2>/dev/null || echo "nobody")
+    if id nobody >/dev/null 2>&1; then
+        XRAY_SERVICE_USER="nobody"
+        XRAY_SERVICE_GROUP=$(id -gn nobody 2>/dev/null || echo "nobody")
+    else
+        XRAY_SERVICE_USER="root"
+        XRAY_SERVICE_GROUP="root"
+    fi
 fi
 
 chown -R "$XRAY_SERVICE_USER:$XRAY_SERVICE_GROUP" /var/log/xray 2>/dev/null || true
