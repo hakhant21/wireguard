@@ -8,13 +8,24 @@ echo "=== Wireguard + Xray Server Installer (LXC Compatible) ==="
 WG_PORT=21821
 XRAY_PORT=10000
 WG_SUBNET="120.76.0.0/24"
+WG_IPV6_SUBNET="fd00:120:76::/64"  # IPv6 ULA subnet
 WG_NETWORK="120.76.0"
+WG_IPV6_NETWORK="fd00:120:76"
 DB_DIR="/etc/wg-xray"
 BACKUP_DIR="/root/wireguard/wg-xray-backups"
 UNINSTALL_SCRIPT="/usr/local/bin/wgx-uninstall"
 WGX_OWNER="${SUDO_USER:-root}"
 if ! id "$WGX_OWNER" >/dev/null 2>&1; then
     WGX_OWNER="root"
+fi
+
+# Detect public IPv6 if available
+PUBLIC_IPV6=""
+if ip -6 addr show scope global | grep -q "inet6"; then
+    PUBLIC_IPV6=$(ip -6 addr show scope global | grep "inet6" | head -1 | awk '{print $2}' | cut -d'/' -f1)
+    echo "✓ Public IPv6 detected: $PUBLIC_IPV6"
+else
+    echo "ℹ️ No public IPv6 detected, WireGuard IPv6 will use ULA only"
 fi
 
 # ========================
@@ -35,6 +46,13 @@ if [ -z "$IFACE" ]; then
     IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
 fi
 echo "Detected outbound interface: $IFACE"
+
+# Detect IPv6 interface if available
+IFACE6=""
+if ip -6 route get 2001:4860:4860::8888 &>/dev/null; then
+    IFACE6=$(ip -6 route get 2001:4860:4860::8888 | awk '{print $5; exit}')
+    echo "Detected IPv6 outbound interface: $IFACE6"
+fi
 
 # ========================
 # FIX: Disable rp_filter for WireGuard in LXC
@@ -112,11 +130,16 @@ sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/g' /etc/
 ufw --force reload
 
 # ========================
-# IP FORWARDING
+# IP FORWARDING (IPv4 and IPv6)
 # ========================
 echo "=== Enabling IP Forwarding ==="
 sysctl -w net.ipv4.ip_forward=1
 sysctl -w net.ipv6.conf.all.forwarding=1
+sysctl -w net.ipv6.conf.default.forwarding=1
+
+# Disable IPv6 duplicate address detection for WireGuard
+sysctl -w net.ipv6.conf.all.accept_dad=0
+sysctl -w net.ipv6.conf.default.accept_dad=0
 
 if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
     echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
@@ -124,11 +147,21 @@ fi
 if ! grep -q "net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf; then
     echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
 fi
+if ! grep -q "net.ipv6.conf.default.forwarding=1" /etc/sysctl.conf; then
+    echo "net.ipv6.conf.default.forwarding=1" >> /etc/sysctl.conf
+fi
+if ! grep -q "net.ipv6.conf.all.accept_dad=0" /etc/sysctl.conf; then
+    cat >> /etc/sysctl.conf <<EOF
+# WireGuard IPv6 optimizations
+net.ipv6.conf.all.accept_dad=0
+net.ipv6.conf.default.accept_dad=0
+EOF
+fi
 
 # ========================
-# WIREGUARD SETUP - FIXED POST RULES
+# WIREGUARD SETUP - WITH IPv6 SUPPORT
 # ========================
-echo "=== Setting up WireGuard ==="
+echo "=== Setting up WireGuard with IPv6 ==="
 mkdir -p /etc/wireguard
 chmod 700 /etc/wireguard
 rm -f /etc/wireguard/wg0.conf 2>/dev/null
@@ -139,11 +172,11 @@ chmod 600 /etc/wireguard/server_private.key
 SERVER_PRIV=$(cat /etc/wireguard/server_private.key)
 SERVER_PUB=$(cat /etc/wireguard/server_public.key)
 
-# Create WireGuard config with CORRECT PostUp/PostDown rules
+# Create WireGuard config with IPv4 and IPv6 support
 cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
 PrivateKey = $SERVER_PRIV
-Address = ${WG_SUBNET%.*}.1/24
+Address = ${WG_SUBNET%.*}.1/24, ${WG_IPV6_NETWORK}::1/64
 ListenPort = $WG_PORT
 MTU = 1420
 
@@ -156,17 +189,33 @@ PostUp = iptables -A FORWARD -i wg0 -j ACCEPT
 PostUp = iptables -A FORWARD -o wg0 -j ACCEPT
 PostUp = iptables -t nat -A POSTROUTING -o $IFACE -j MASQUERADE
 PostUp = iptables -t nat -A POSTROUTING -s ${WG_SUBNET} -o $IFACE -j MASQUERADE
+PostUp = ip6tables -A FORWARD -i wg0 -j ACCEPT
+PostUp = ip6tables -A FORWARD -o wg0 -j ACCEPT
+PostUp = ip6tables -t nat -A POSTROUTING -s ${WG_IPV6_SUBNET} -o $IFACE6 -j MASQUERADE
 
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT
 PostDown = iptables -D FORWARD -o wg0 -j ACCEPT
 PostDown = iptables -t nat -D POSTROUTING -o $IFACE -j MASQUERADE
 PostDown = iptables -t nat -D POSTROUTING -s ${WG_SUBNET} -o $IFACE -j MASQUERADE
-
+PostDown = ip6tables -D FORWARD -i wg0 -j ACCEPT
+PostDown = ip6tables -D FORWARD -o wg0 -j ACCEPT
+PostDown = ip6tables -t nat -D POSTROUTING -s ${WG_IPV6_SUBNET} -o $IFACE6 -j MASQUERADE
 EOF
+
+# Add IPv6 NAT if no public IPv6 is available
+if [ -z "$PUBLIC_IPV6" ]; then
+    cat >> /etc/wireguard/wg0.conf <<EOF
+
+# IPv6 NAT rules for ULA-only setup
+PostUp = ip6tables -t nat -A POSTROUTING -s ${WG_IPV6_SUBNET} -j MASQUERADE
+PostDown = ip6tables -t nat -D POSTROUTING -s ${WG_IPV6_SUBNET} -j MASQUERADE
+EOF
+fi
 
 # Add Netbird routing if detected
 if [ "$NETBIRD_ACTIVE" = true ] && [ -n "$NETBIRD_INTERFACE" ]; then
     cat >> /etc/wireguard/wg0.conf <<EOF
+
 # Netbird integration
 PostUp = iptables -A FORWARD -i wg0 -o $NETBIRD_INTERFACE -j ACCEPT
 PostUp = iptables -A FORWARD -i $NETBIRD_INTERFACE -o wg0 -j ACCEPT
@@ -492,7 +541,7 @@ chmod 644 "$DB_DIR/users.db"
 echo "$(date)" > "$DB_DIR/.installed"
 
 # ========================
-# CLI TOOL - FIXED MTU
+# CLI TOOL - WITH IPv6 SUPPORT
 # ========================
 cat > /usr/local/bin/wgx <<'CLIEOF'
 #!/bin/bash
@@ -530,6 +579,19 @@ get_next_ip() {
         echo "120.76.0.2"
     else
         echo "120.76.0.$((LAST+1))"
+    fi
+}
+
+get_next_ipv6() {
+    if [ ! -f "$DB" ]; then
+        echo "fd00:120:76::2"
+        return
+    fi
+    LAST=$(awk -F',' '{print $4}' "$DB" 2>/dev/null | awk -F':' '{print $NF}' | sort -n | tail -1)
+    if [ -z "$LAST" ] || [ "$LAST" -lt 2 ]; then
+        echo "fd00:120:76::2"
+    else
+        echo "fd00:120:76::$((LAST+1))"
     fi
 }
 
@@ -604,41 +666,63 @@ add_user() {
     fi
     
     IP=$(get_next_ip)
+    IPV6=$(get_next_ipv6)
     
     WG_KEY=$($USE_SUDO wg genkey)
     PRIV="$WG_KEY"
     PUB=$(echo "$WG_KEY" | $USE_SUDO wg pubkey)
     UUID=$(cat /proc/sys/kernel/random/uuid)
     
-    $USE_SUDO bash -c "echo \"$USER,$UUID,$IP,$PUB\" >> \"$DB\""
+    $USE_SUDO bash -c "echo \"$USER,$UUID,$IP,$IPV6,$PUB\" >> \"$DB\""
     
     $USE_SUDO bash -c "cat >> \"$WG_CONF\" <<EOC
 
 [Peer]
 PublicKey = $PUB
-AllowedIPs = $IP/32
+AllowedIPs = $IP/32, $IPV6/128
 EOC"
     
     $USE_SUDO systemctl restart wg-quick@wg0
     
     SERVER_IP=$(curl -s ifconfig.me)
+    SERVER_IPV6=""
+    if ip -6 addr show scope global | grep -q "inet6"; then
+        SERVER_IPV6=$(ip -6 addr show scope global | grep "inet6" | head -1 | awk '{print $2}' | cut -d'/' -f1)
+    fi
     SERVER_PUB=$($USE_SUDO cat /etc/wireguard/server_public.key)
     
     $USE_SUDO mkdir -p "$BACKUP_DIR"
-    # FIX: Set MTU to 1420 to match server
-    $USE_SUDO tee "$BACKUP_DIR/wg-$USER.conf" > /dev/null <<EOC
+    
+    # Generate client config with or without IPv6 endpoint
+    if [ -n "$SERVER_IPV6" ]; then
+        $USE_SUDO tee "$BACKUP_DIR/wg-$USER.conf" > /dev/null <<EOC
 [Interface]
 PrivateKey = $PRIV
-Address = $IP/24
-DNS = 1.1.1.1, 8.8.8.8
+Address = $IP/24, $IPV6/64
+DNS = 1.1.1.1, 8.8.8.8, 2606:4700:4700::1111, 2001:4860:4860::8888
 MTU = 1420
 
 [Peer]
 PublicKey = $SERVER_PUB
 Endpoint = $SERVER_IP:21821
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 EOC
+    else
+        $USE_SUDO tee "$BACKUP_DIR/wg-$USER.conf" > /dev/null <<EOC
+[Interface]
+PrivateKey = $PRIV
+Address = $IP/24, $IPV6/64
+DNS = 1.1.1.1, 8.8.8.8, 2606:4700:4700::1111, 2001:4860:4860::8888
+MTU = 1420
+
+[Peer]
+PublicKey = $SERVER_PUB
+Endpoint = $SERVER_IP:21821
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOC
+    fi
     
     sync_xray
     backup_configs "$USER"
@@ -646,7 +730,8 @@ EOC
     echo ""
     echo -e "${GREEN}=== USER CREATED ===${NC}"
     echo "Username: $USER"
-    echo "IP: $IP"
+    echo "IPv4: $IP"
+    echo "IPv6: $IPV6"
     echo "UUID: $UUID"
     echo "WG Config: $BACKUP_DIR/wg-$USER.conf"
     
@@ -683,12 +768,12 @@ remove_user() {
     keep {print}
     ' "$WG_CONF" > "$TMP"
     
-    while IFS=',' read -r u uuid ip pub; do
+    while IFS=',' read -r u uuid ip ipv6 pub rest; do
         [ -z "$u" ] && continue
         echo "" >> "$TMP"
         echo "[Peer]" >> "$TMP"
         echo "PublicKey = $pub" >> "$TMP"
-        echo "AllowedIPs = $ip/32" >> "$TMP"
+        echo "AllowedIPs = $ip/32, $ipv6/128" >> "$TMP"
     done < "$DB"
     
     $USE_SUDO mv "$TMP" "$WG_CONF"
@@ -707,11 +792,11 @@ list_users() {
         return
     fi
     
-    printf "%-20s %-36s %-15s\n" "USERNAME" "UUID" "IP"
-    echo "--------------------------------------------------------------------------------"
+    printf "%-20s %-36s %-15s %-20s\n" "USERNAME" "UUID" "IPv4" "IPv6"
+    echo "--------------------------------------------------------------------------------------------"
     
-    while IFS=',' read -r user uuid ip pub; do
-        printf "%-20s %-36s %-15s\n" "$user" "$uuid" "$ip"
+    while IFS=',' read -r user uuid ip ipv6 pub rest; do
+        printf "%-20s %-36s %-15s %-20s\n" "$user" "$uuid" "$ip" "$ipv6"
     done < "$DB"
 }
 
@@ -734,12 +819,13 @@ show_user() {
         return 1
     fi
     
-    IFS=',' read -r user uuid ip pub <<< "$line"
+    IFS=',' read -r user uuid ip ipv6 pub rest <<< "$line"
     
     echo -e "${GREEN}User Details:${NC}"
     echo "Username: $user"
     echo "UUID: $uuid"
-    echo "IP: $ip"
+    echo "IPv4: $ip"
+    echo "IPv6: $ipv6"
     
     if [ -f "$BACKUP_DIR/wg-$user.conf" ]; then
         generate_qr "$user" "$uuid"
@@ -821,10 +907,15 @@ rm -f /etc/sudoers.d/wgx
 rm -f /etc/systemd/system/xray.service
 systemctl daemon-reload
 
-# Clean iptables
+# Clean iptables (IPv4)
 iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null
 iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null
 iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null
+
+# Clean iptables (IPv6)
+ip6tables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null
+ip6tables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null
+ip6tables -t nat -D POSTROUTING -s fd00:120:76::/64 -j MASQUERADE 2>/dev/null
 
 echo "=== Uninstall Complete ==="
 UNINSTALLEOF
@@ -848,6 +939,14 @@ else
     echo "✗ WireGuard: Failed"
 fi
 
+echo "WireGuard interfaces:"
+wg show
+
+echo ""
+echo "IPv6 addresses on wg0:"
+ip -6 addr show wg0 2>/dev/null || echo "  No wg0 interface or IPv6 not configured"
+
+echo ""
 echo "Xray status:"
 if systemctl is-active --quiet xray 2>/dev/null; then
     echo "✓ Xray: Running"
@@ -856,24 +955,29 @@ elif pgrep -x xray > /dev/null; then
 else
     echo "✗ Xray: Failed"
     echo "Checking for errors:"
-    journalctl -u xray -n 5 --no-pager 2>/dev/null || echo "No journal entries found"
+    journalctl -u xray -n 5 --no-pager 2>/dev/null || echo "  No journal entries found"
 fi
 
 if [ "$NETBIRD_ACTIVE" = true ]; then
     docker ps --format "table {{.Names}}" 2>/dev/null | grep -q netbird && echo "✓ Netbird: Running" || echo "⚠️ Netbird: Not detected"
 fi
 
-echo ""
-echo "WireGuard peers:"
-wg show
-
 SERVER_IP=$(curl -s ifconfig.me)
+SERVER_IPV6=""
+if ip -6 addr show scope global | grep -q "inet6"; then
+    SERVER_IPV6=$(ip -6 addr show scope global | grep "inet6" | head -1 | awk '{print $2}' | cut -d'/' -f1)
+fi
 
 echo ""
-echo "=== INSTALL COMPLETE (LXC Optimized) ==="
-echo "Server IP: $SERVER_IP"
-echo "WireGuard Port: $WG_PORT"
-echo "XRAY Port: $XRAY_PORT"
+echo "=== INSTALL COMPLETE (LXC Optimized with IPv6) ==="
+echo "Server IPv4: $SERVER_IP"
+if [ -n "$SERVER_IPV6" ]; then
+    echo "Server IPv6: $SERVER_IPV6"
+else
+    echo "Server IPv6: Not available (using ULA: ${WG_IPV6_NETWORK}::1)"
+fi
+echo "WireGuard Port: $WG_PORT (UDP)"
+echo "XRAY Port: $XRAY_PORT (TCP)"
 echo ""
 echo "Commands:"
 echo "  wgx add username    - Add user"
