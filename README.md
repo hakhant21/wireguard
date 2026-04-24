@@ -14,12 +14,12 @@ The script in `install.sh` performs these actions:
 
 - Installs packages: `wireguard`, `curl`, `iptables`, `jq`, `qrencode`, `ufw`, `fail2ban`
 - Creates data/backup directories:
- 	- `/etc/wg-xray`
- 	- `/root/wireguard/wg-xray-backups`
+  - `/etc/wg-xray`
+  - `/root/wireguard/wg-xray-backups`
 - Configures UFW:
- 	- Allows SSH
- 	- Opens WireGuard UDP port `51820`
- 	- Opens Xray TCP port `10000`
+  - Allows SSH
+  - Opens WireGuard UDP port `21821`
+  - Opens Xray TCP port `10000`
 - Enables IPv4 forwarding and applies kernel sysctl tuning
 - Generates WireGuard server keys and `/etc/wireguard/wg0.conf`
 - Installs and configures Xray at `/usr/local/etc/xray/config.json`
@@ -104,9 +104,9 @@ wgx backup alice
 
 ## Notes
 
-- Default WireGuard subnet is `100.76.0.0/24`.
+- Default WireGuard subnet is `120.76.0.0/24`.
+- WireGuard is configured as IPv4-only.
 - Client WireGuard configs are saved in the backup directory as `wg-<username>.conf`.
-- Xray links are saved as `<username>-xray-link.txt` in the backup directory.
 - `wgx show <username>` attempts to print both XRAY and WireGuard QR codes.
 
 ## Security recommendations
