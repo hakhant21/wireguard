@@ -357,7 +357,7 @@ sync_xray() {
         $USE_SUDO chmod 644 "$DB"
     fi
     
-    CLIENTS=$(awk -F',' '{printf "{\"id\":\"%s\",\"flow\":\"xtls-rprx-vision\"},",$2}' "$DB" 2>/dev/null | sed 's/,$//')
+    CLIENTS=$(awk -F',' '{printf "{\"id\":\"%s\"},",$2}' "$DB" 2>/dev/null | sed 's/,$//')
     
     if [ -z "$CLIENTS" ]; then
         CLIENTS=""
@@ -381,7 +381,7 @@ generate_qr() {
         PUB_KEY=""
     fi
     
-    XRAY_LINK="vless://$UUID@$SERVER_IP:10000?type=grpc&security=reality&serviceName=grpc&pbk=$PUB_KEY&sni=www.google.com&flow=xtls-rprx-vision#$USER"
+    XRAY_LINK="vless://$UUID@$SERVER_IP:10000?type=grpc&security=reality&serviceName=grpc&pbk=$PUB_KEY&sni=www.google.com#$USER"
     
     echo ""
     echo -e "${GREEN}===== XRAY LINK =====${NC}"
