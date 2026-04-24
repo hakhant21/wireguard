@@ -82,8 +82,9 @@ fi
 # ========================
 # INSTALL DEPENDENCIES
 # ========================
+echo "=== Installing Dependencies ==="
 apt update -y
-apt install -y wireguard curl iptables jq qrencode ufw fail2ban unzip
+apt install -y wireguard curl iptables jq qrencode ufw fail2ban unzip wget
 
 # Create directories
 mkdir -p "$DB_DIR" "$BACKUP_DIR"
@@ -93,6 +94,7 @@ chmod 755 "$BACKUP_DIR"
 # ========================
 # FIREWALL SETUP (Preserve existing)
 # ========================
+echo "=== Configuring Firewall ==="
 if ! ufw status | grep -q "Status: active"; then
     ufw --force enable
 fi
@@ -112,6 +114,7 @@ ufw --force reload
 # ========================
 # IP FORWARDING
 # ========================
+echo "=== Enabling IP Forwarding ==="
 sysctl -w net.ipv4.ip_forward=1
 sysctl -w net.ipv6.conf.all.forwarding=1
 
@@ -125,6 +128,7 @@ fi
 # ========================
 # WIREGUARD SETUP - FIXED POST RULES
 # ========================
+echo "=== Setting up WireGuard ==="
 mkdir -p /etc/wireguard
 chmod 700 /etc/wireguard
 rm -f /etc/wireguard/wg0.conf 2>/dev/null
@@ -189,19 +193,154 @@ else
 fi
 
 # ========================
-# XRAY INSTALL (Unchanged)
+# XRAY INSTALL - FIXED WITH FALLBACK
 # ========================
-bash -c "$(curl -sL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" install
+echo "=== Installing Xray ==="
 
-KEYS=$(/usr/local/bin/xray x25519)
-XRAY_PRIV=$(echo "$KEYS" | grep Private | awk '{print $3}')
-XRAY_PUB=$(echo "$KEYS" | grep Public | awk '{print $3}')
+XRAY_INSTALL_SUCCESS=false
 
+# Method 1: Try official install script with error handling
+echo "Attempting official Xray installation..."
+if curl -sL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh -o /tmp/xray-install.sh; then
+    chmod +x /tmp/xray-install.sh
+    if bash /tmp/xray-install.sh install 2>&1 | tee /tmp/xray-install.log; then
+        XRAY_INSTALL_SUCCESS=true
+        echo "✓ Xray installed via official script"
+    else
+        echo "⚠️ Official install script failed, checking log..."
+        cat /tmp/xray-install.log
+    fi
+else
+    echo "⚠️ Could not download official install script"
+fi
+
+# Method 2: Manual installation if official script fails
+if [ "$XRAY_INSTALL_SUCCESS" = false ]; then
+    echo "=== Performing manual Xray installation ==="
+    
+    # Detect architecture
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64)  XRAY_ARCH="linux-64" ;;
+        aarch64) XRAY_ARCH="linux-arm64-v8a" ;;
+        armv7l)  XRAY_ARCH="linux-arm32-v7a" ;;
+        *)       
+            echo "Unsupported architecture: $ARCH"
+            echo "Attempting linux-64 as fallback..."
+            XRAY_ARCH="linux-64"
+            ;;
+    esac
+    
+    # Download Xray
+    XRAY_VERSION=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -o '"tag_name": "[^"]*' | grep -o '[^"]*$')
+    if [ -z "$XRAY_VERSION" ]; then
+        XRAY_VERSION="v1.8.21"  # Fallback version
+        echo "Using default version: $XRAY_VERSION"
+    fi
+    
+    DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-${XRAY_ARCH}.zip"
+    echo "Downloading Xray from: $DOWNLOAD_URL"
+    
+    cd /tmp
+    if wget -O xray.zip "$DOWNLOAD_URL"; then
+        unzip -o xray.zip
+        
+        # Install binary
+        mkdir -p /usr/local/bin
+        cp xray /usr/local/bin/xray
+        chmod +x /usr/local/bin/xray
+        
+        # Install config directory
+        mkdir -p /usr/local/etc/xray
+        
+        # Install geo data
+        mkdir -p /usr/local/share/xray
+        cp geoip.dat geosite.dat /usr/local/share/xray/ 2>/dev/null || true
+        
+        # Create systemd service
+        cat > /etc/systemd/system/xray.service <<'SERVICEEOF'
+[Unit]
+Description=Xray Service
+Documentation=https://github.com/xtls
+After=network.target nss-lookup.target
+
+[Service]
+User=nobody
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+Restart=on-failure
+RestartPreventExitStatus=23
+LimitNPROC=10000
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
+        
+        systemctl daemon-reload
+        echo "✓ Xray installed manually"
+    else
+        echo "✗ Failed to download Xray"
+        exit 1
+    fi
+    
+    cd - > /dev/null
+fi
+
+# Verify Xray installation
+if ! command -v xray &>/dev/null; then
+    if [ -f /usr/local/bin/xray ]; then
+        echo "Found Xray binary at /usr/local/bin/xray"
+        export PATH="/usr/local/bin:$PATH"
+    else
+        echo "✗ Xray binary not found, searching..."
+        XRAY_BIN=$(find / -name xray -type f -executable 2>/dev/null | head -1)
+        if [ -n "$XRAY_BIN" ]; then
+            echo "Found Xray at: $XRAY_BIN"
+            ln -sf "$XRAY_BIN" /usr/local/bin/xray 2>/dev/null || true
+        else
+            echo "✗ Xray installation failed completely"
+            exit 1
+        fi
+    fi
+fi
+
+# Test Xray
+if /usr/local/bin/xray version &>/dev/null; then
+    echo "✓ Xray binary working"
+else
+    echo "✗ Xray binary not working"
+    exit 1
+fi
+
+# Generate Xray keys
+echo "Generating Xray Reality keys..."
+KEYS=$(/usr/local/bin/xray x25519 2>&1) || {
+    echo "✗ Failed to generate x25519 keys"
+    echo "Xray output: $KEYS"
+    exit 1
+}
+
+XRAY_PRIV=$(echo "$KEYS" | grep -i "private" | awk '{print $NF}')
+XRAY_PUB=$(echo "$KEYS" | grep -i "public" | awk '{print $NF}')
+
+if [ -z "$XRAY_PRIV" ] || [ -z "$XRAY_PUB" ]; then
+    echo "✗ Failed to parse Xray keys"
+    echo "Raw keys output: $KEYS"
+    exit 1
+fi
+
+echo "✓ Xray keys generated"
+
+# Save keys
 echo "$XRAY_PUB" > "$DB_DIR/xray_public.key"
 echo "$XRAY_PRIV" > "$DB_DIR/xray_private.key"
 chmod 600 "$DB_DIR/xray_private.key"
 chmod 644 "$DB_DIR/xray_public.key"
 
+# Create Xray config
 mkdir -p /usr/local/etc/xray
 
 cat > /usr/local/etc/xray/config.json <<EOF
@@ -264,38 +403,89 @@ cat > /usr/local/etc/xray/config.json <<EOF
 }
 EOF
 
+# Setup log directory and permissions
 mkdir -p /var/log/xray
 touch /var/log/xray/access.log /var/log/xray/error.log
-XRAY_SERVICE_USER=$(systemctl show -p User --value xray 2>/dev/null || true)
-XRAY_SERVICE_GROUP=$(systemctl show -p Group --value xray 2>/dev/null || true)
+
+# Detect Xray service user
+XRAY_SERVICE_USER=""
+XRAY_SERVICE_GROUP=""
+
+# Check if systemd service exists and extract user
+if [ -f /etc/systemd/system/xray.service ]; then
+    XRAY_SERVICE_USER=$(grep "^User=" /etc/systemd/system/xray.service | cut -d'=' -f2)
+    XRAY_SERVICE_GROUP=$(grep "^Group=" /etc/systemd/system/xray.service | cut -d'=' -f2 2>/dev/null || echo "")
+elif [ -f /usr/lib/systemd/system/xray.service ]; then
+    XRAY_SERVICE_USER=$(grep "^User=" /usr/lib/systemd/system/xray.service | cut -d'=' -f2)
+    XRAY_SERVICE_GROUP=$(grep "^Group=" /usr/lib/systemd/system/xray.service | cut -d'=' -f2 2>/dev/null || echo "")
+fi
+
+# Set defaults if not found
+if [ -z "$XRAY_SERVICE_USER" ]; then
+    # Try to get from systemd
+    XRAY_SERVICE_USER=$(systemctl show -p User --value xray 2>/dev/null || echo "")
+    XRAY_SERVICE_GROUP=$(systemctl show -p Group --value xray 2>/dev/null || echo "")
+fi
 
 if [ -z "$XRAY_SERVICE_USER" ]; then
-    XRAY_SERVICE_USER="root"
+    XRAY_SERVICE_USER="nobody"
 fi
 if [ -z "$XRAY_SERVICE_GROUP" ]; then
-    XRAY_SERVICE_GROUP="$XRAY_SERVICE_USER"
+    XRAY_SERVICE_GROUP=$(id -gn "$XRAY_SERVICE_USER" 2>/dev/null || echo "nogroup")
 fi
 
-if ! id "$XRAY_SERVICE_USER" >/dev/null 2>&1; then
-    if id nobody >/dev/null 2>&1; then
-        XRAY_SERVICE_USER="nobody"
-        XRAY_SERVICE_GROUP=$(id -gn nobody 2>/dev/null || echo "nobody")
-    else
-        XRAY_SERVICE_USER="root"
-        XRAY_SERVICE_GROUP="root"
-    fi
+echo "Xray will run as: $XRAY_SERVICE_USER:$XRAY_SERVICE_GROUP"
+
+# Create user if it doesn't exist
+if ! id "$XRAY_SERVICE_USER" >/dev/null 2>&1 && [ "$XRAY_SERVICE_USER" != "root" ]; then
+    useradd -r -s /bin/false "$XRAY_SERVICE_USER" 2>/dev/null || true
 fi
 
+# Set permissions
 chown -R "$XRAY_SERVICE_USER:$XRAY_SERVICE_GROUP" /var/log/xray 2>/dev/null || true
 chmod 750 /var/log/xray
 chmod 640 /var/log/xray/access.log /var/log/xray/error.log
 
-systemctl enable xray
-systemctl restart xray
+# Test Xray config
+echo "Testing Xray configuration..."
+if /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json 2>&1; then
+    echo "✓ Xray configuration valid"
+else
+    echo "⚠️ Xray configuration test failed, but continuing..."
+fi
+
+# Enable and start Xray
+systemctl enable xray 2>/dev/null || true
+systemctl restart xray || {
+    echo "⚠️ Failed to restart Xray service. Checking status:"
+    systemctl status xray --no-pager -l || true
+    echo ""
+    echo "Checking journal:"
+    journalctl -u xray -n 20 --no-pager || true
+}
+
+sleep 2
+
+# Verify Xray is running
+if systemctl is-active --quiet xray 2>/dev/null; then
+    echo "✓ Xray service running"
+else
+    echo "⚠️ Xray service not running. Attempting manual start..."
+    /usr/local/bin/xray run -config /usr/local/etc/xray/config.json &
+    XRAY_PID=$!
+    sleep 2
+    if kill -0 $XRAY_PID 2>/dev/null; then
+        echo "✓ Xray running in foreground (PID: $XRAY_PID)"
+    else
+        echo "✗ Xray failed to start"
+        echo "Check logs for details"
+    fi
+fi
 
 # ========================
 # USER DATABASE & CLI TOOL
 # ========================
+echo "=== Setting up CLI tools ==="
 touch "$DB_DIR/users.db"
 chmod 644 "$DB_DIR/users.db"
 
@@ -304,7 +494,7 @@ echo "$(date)" > "$DB_DIR/.installed"
 # ========================
 # CLI TOOL - FIXED MTU
 # ========================
-cat > /usr/local/bin/wgx <<'EOF'
+cat > /usr/local/bin/wgx <<'CLIEOF'
 #!/bin/bash
 
 DB="/etc/wg-xray/users.db"
@@ -367,7 +557,10 @@ sync_xray() {
     $USE_SUDO jq ".inbounds[0].settings.clients = [ $CLIENTS ]" "$XRAY_CONF" > /tmp/xray.json
     $USE_SUDO mv /tmp/xray.json "$XRAY_CONF"
     
-    $USE_SUDO systemctl restart xray
+    # Restart Xray if running
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        $USE_SUDO systemctl restart xray
+    fi
     log "XRAY configuration synced"
 }
 
@@ -583,7 +776,7 @@ case "$1" in
         echo "  backup           - Create configuration backup"
         ;;
 esac
-EOF
+CLIEOF
 
 chmod +x /usr/local/bin/wgx
 
@@ -596,7 +789,7 @@ fi
 # ========================
 # CREATE UNINSTALL SCRIPT
 # ========================
-cat > "$UNINSTALL_SCRIPT" <<'EOF'
+cat > "$UNINSTALL_SCRIPT" <<'UNINSTALLEOF'
 #!/bin/bash
 
 echo "=== WireGuard + Xray Uninstaller ==="
@@ -618,11 +811,15 @@ systemctl disable xray 2>/dev/null
 ip link del wg0 2>/dev/null
 rm -rf /etc/wireguard
 rm -rf /usr/local/etc/xray
+rm -rf /usr/local/share/xray
 rm -rf /var/log/xray
 rm -rf /etc/wg-xray
 rm -rf /root/wireguard/wg-xray-backups
 rm -f /usr/local/bin/wgx
+rm -f /usr/local/bin/xray
 rm -f /etc/sudoers.d/wgx
+rm -f /etc/systemd/system/xray.service
+systemctl daemon-reload
 
 # Clean iptables
 iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null
@@ -630,11 +827,12 @@ iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null
 iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null
 
 echo "=== Uninstall Complete ==="
-EOF
+UNINSTALLEOF
 
 chmod +x "$UNINSTALL_SCRIPT"
 
 # Save iptables
+echo "=== Saving iptables rules ==="
 apt install -y iptables-persistent 2>/dev/null || true
 netfilter-persistent save 2>/dev/null || true
 
@@ -643,8 +841,23 @@ netfilter-persistent save 2>/dev/null || true
 # ========================
 echo ""
 echo "=== VERIFICATION ==="
-systemctl is-active wg-quick@wg0 && echo "✓ WireGuard: Running" || echo "✗ WireGuard: Failed"
-systemctl is-active xray && echo "✓ Xray: Running" || echo "✗ Xray: Failed"
+echo "WireGuard status:"
+if systemctl is-active --quiet wg-quick@wg0; then
+    echo "✓ WireGuard: Running"
+else
+    echo "✗ WireGuard: Failed"
+fi
+
+echo "Xray status:"
+if systemctl is-active --quiet xray 2>/dev/null; then
+    echo "✓ Xray: Running"
+elif pgrep -x xray > /dev/null; then
+    echo "⚠️ Xray: Running (but not via systemd)"
+else
+    echo "✗ Xray: Failed"
+    echo "Checking for errors:"
+    journalctl -u xray -n 5 --no-pager 2>/dev/null || echo "No journal entries found"
+fi
 
 if [ "$NETBIRD_ACTIVE" = true ]; then
     docker ps --format "table {{.Names}}" 2>/dev/null | grep -q netbird && echo "✓ Netbird: Running" || echo "⚠️ Netbird: Not detected"
@@ -666,5 +879,12 @@ echo "Commands:"
 echo "  wgx add username    - Add user"
 echo "  wgx list            - List users"
 echo "  wgx show username   - Show QR codes"
+echo "  wgx backup          - Backup configurations"
 echo ""
 echo "To uninstall: sudo wgx-uninstall"
+echo ""
+echo "Configuration files:"
+echo "  WireGuard: /etc/wireguard/wg0.conf"
+echo "  Xray:      /usr/local/etc/xray/config.json"
+echo "  Users DB:  /etc/wg-xray/users.db"
+echo "  Backups:   $BACKUP_DIR"
