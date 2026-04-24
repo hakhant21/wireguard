@@ -12,6 +12,10 @@ WG_NETWORK="120.76.0"
 DB_DIR="/etc/wg-xray"
 BACKUP_DIR="/root/wireguard/wg-xray-backups"
 UNINSTALL_SCRIPT="/usr/local/bin/wgx-uninstall"
+WGX_OWNER="${SUDO_USER:-root}"
+if ! id "$WGX_OWNER" >/dev/null 2>&1; then
+    WGX_OWNER="root"
+fi
 
 # ========================
 # DETECT LXC ENVIRONMENT
@@ -85,7 +89,6 @@ apt install -y wireguard curl iptables jq qrencode ufw fail2ban unzip
 mkdir -p "$DB_DIR" "$BACKUP_DIR"
 chmod 750 "$DB_DIR"
 chmod 755 "$BACKUP_DIR"
-chown -R pos:pos "/home/pos/wireguard" 2>/dev/null || true
 
 # ========================
 # FIREWALL SETUP (Preserve existing)
@@ -260,8 +263,29 @@ EOF
 
 mkdir -p /var/log/xray
 touch /var/log/xray/access.log /var/log/xray/error.log
-chown -R xray:xray /var/log/xray 2>/dev/null || true
+XRAY_SERVICE_USER=$(systemctl show -p User --value xray 2>/dev/null || true)
+XRAY_SERVICE_GROUP=$(systemctl show -p Group --value xray 2>/dev/null || true)
+
+if [ -z "$XRAY_SERVICE_USER" ]; then
+    XRAY_SERVICE_USER="root"
+fi
+if [ -z "$XRAY_SERVICE_GROUP" ]; then
+    XRAY_SERVICE_GROUP="$XRAY_SERVICE_USER"
+fi
+
+if ! id "$XRAY_SERVICE_USER" >/dev/null 2>&1; then
+    if id nobody >/dev/null 2>&1; then
+        XRAY_SERVICE_USER="nobody"
+        XRAY_SERVICE_GROUP=$(id -gn nobody 2>/dev/null || echo "nobody")
+    else
+        XRAY_SERVICE_USER="root"
+        XRAY_SERVICE_GROUP="root"
+    fi
+fi
+
+chown -R "$XRAY_SERVICE_USER:$XRAY_SERVICE_GROUP" /var/log/xray 2>/dev/null || true
 chmod 750 /var/log/xray
+chmod 640 /var/log/xray/access.log /var/log/xray/error.log
 
 systemctl enable xray
 systemctl restart xray
@@ -283,7 +307,7 @@ cat > /usr/local/bin/wgx <<'EOF'
 DB="/etc/wg-xray/users.db"
 WG_CONF="/etc/wireguard/wg0.conf"
 XRAY_CONF="/usr/local/etc/xray/config.json"
-BACKUP_DIR="/home/pos/wireguard/wg-xray-backups"
+BACKUP_DIR="/root/wireguard/wg-xray-backups"
 
 USE_SUDO=""
 if [ "$EUID" -ne 0 ]; then
@@ -320,7 +344,7 @@ backup_configs() {
     NAME=$1
     [ -z "$NAME" ] && NAME="manual"
     FILE="$BACKUP_DIR/backup_${NAME}.tar.gz"
-    mkdir -p "$BACKUP_DIR"
+    $USE_SUDO mkdir -p "$BACKUP_DIR"
     $USE_SUDO tar -czf "$FILE" "$WG_CONF" "$XRAY_CONF" "$DB" 2>/dev/null || true
     log "Backup: $FILE"
 }
@@ -404,9 +428,9 @@ EOC"
     SERVER_IP=$(curl -s ifconfig.me)
     SERVER_PUB=$($USE_SUDO cat /etc/wireguard/server_public.key)
     
-    mkdir -p "$BACKUP_DIR"
+    $USE_SUDO mkdir -p "$BACKUP_DIR"
     # FIX: Set MTU to 1420 to match server
-    cat > "$BACKUP_DIR/wg-$USER.conf" <<EOC
+    $USE_SUDO tee "$BACKUP_DIR/wg-$USER.conf" > /dev/null <<EOC
 [Interface]
 PrivateKey = $PRIV
 Address = $IP/24
@@ -476,7 +500,7 @@ remove_user() {
     $USE_SUDO systemctl restart wg-quick@wg0
     sync_xray
     
-    rm -f "$BACKUP_DIR/wg-$USER.conf" "$BACKUP_DIR/$USER-xray-link.txt" 2>/dev/null
+    $USE_SUDO rm -f "$BACKUP_DIR/wg-$USER.conf" "$BACKUP_DIR/$USER-xray-link.txt" 2>/dev/null
     
     echo -e "${GREEN}User removed: $USER${NC}"
 }
@@ -560,9 +584,11 @@ EOF
 
 chmod +x /usr/local/bin/wgx
 
-# Add pos user to sudoers
-echo "pos ALL=(ALL) NOPASSWD: /usr/local/bin/wgx" > /etc/sudoers.d/wgx
-chmod 440 /etc/sudoers.d/wgx
+# Add invoking user to sudoers (when installer was run with sudo)
+if [ "$WGX_OWNER" != "root" ]; then
+    echo "$WGX_OWNER ALL=(ALL) NOPASSWD: /usr/local/bin/wgx" > /etc/sudoers.d/wgx
+    chmod 440 /etc/sudoers.d/wgx
+fi
 
 # ========================
 # CREATE UNINSTALL SCRIPT
@@ -591,7 +617,7 @@ rm -rf /etc/wireguard
 rm -rf /usr/local/etc/xray
 rm -rf /var/log/xray
 rm -rf /etc/wg-xray
-rm -rf /home/pos/wireguard/wg-xray-backups
+rm -rf /root/wireguard/wg-xray-backups
 rm -f /usr/local/bin/wgx
 rm -f /etc/sudoers.d/wgx
 
