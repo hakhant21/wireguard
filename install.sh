@@ -125,6 +125,8 @@ fi
 # ========================
 # WIREGUARD SETUP - FIXED POST RULES
 # ========================
+mkdir -p /etc/wireguard
+chmod 700 /etc/wireguard
 rm -f /etc/wireguard/wg0.conf 2>/dev/null
 
 wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
