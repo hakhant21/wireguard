@@ -275,11 +275,11 @@ fi
 
 if ! id "$XRAY_SERVICE_USER" >/dev/null 2>&1; then
     XRAY_SERVICE_USER="nobody"
-    XRAY_SERVICE_GROUP="nogroup"
+    XRAY_SERVICE_GROUP=$(id -gn nobody 2>/dev/null || echo "nobody")
 fi
 
 chown -R "$XRAY_SERVICE_USER:$XRAY_SERVICE_GROUP" /var/log/xray 2>/dev/null || true
-chmod 755 /var/log/xray
+chmod 750 /var/log/xray
 chmod 640 /var/log/xray/access.log /var/log/xray/error.log
 
 systemctl enable xray
