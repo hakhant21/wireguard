@@ -703,7 +703,7 @@ generate_qr() {
     echo ""
     echo -e "${GREEN}===== XRAY LINK (IPv4) =====${NC}"
     echo "$XRAY_LINK"
-    qrencode -t ansiutf8 "$XRAY_LINK" 2>/dev/null || echo "QR code generation failed"
+    qrencode -t ansiutf8 -s 2 -m 1 "$XRAY_LINK" 2>/dev/null || echo "QR code generation failed"
     
     # Xray link (IPv6) if available
     if [ "$HAS_IPV6" = true ] && [ -n "$SERVER_IP6" ]; then
@@ -711,13 +711,13 @@ generate_qr() {
         echo ""
         echo -e "${GREEN}===== XRAY LINK (IPv6) =====${NC}"
         echo "$XRAY_LINK6"
-        qrencode -t ansiutf8 "$XRAY_LINK6" 2>/dev/null || echo "QR code generation failed"
+        qrencode -t ansiutf8 -s 2 -m 1 "$XRAY_LINK6" 2>/dev/null || echo "QR code generation failed"
     fi
     
     echo ""
     echo -e "${GREEN}===== WG QR =====${NC}"
     if [ -f "$BACKUP_DIR/wg-$USER.conf" ]; then
-        qrencode -t ansiutf8 < "$BACKUP_DIR/wg-$USER.conf" 2>/dev/null || echo "QR code generation failed"
+        qrencode -t ansiutf8 -s 2 -m 1 < "$BACKUP_DIR/wg-$USER.conf" 2>/dev/null || echo "QR code generation failed"
     fi
 }
 
