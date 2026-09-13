@@ -104,7 +104,7 @@ wgx backup alice
 
 ## Notes
 
-- Default WireGuard subnet is `120.76.0.0/24`.
+- Default WireGuard subnet is `10.76.0.0/24`.
 - WireGuard is configured as IPv4-only.
 - Client WireGuard configs are saved in the backup directory as `wg-<username>.conf`.
 - `wgx show <username>` attempts to print both XRAY and WireGuard QR codes.
