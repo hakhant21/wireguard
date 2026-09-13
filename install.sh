@@ -224,10 +224,13 @@ rm -f /etc/wireguard/wg0.conf 2>/dev/null
 
 # Keep the server identity stable when the installer is run again. Existing
 # client profiles cannot complete a handshake after the server key changes.
-if [ ! -s /etc/wireguard/server_private.key ] || [ ! -s /etc/wireguard/server_public.key ]; then
-    wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
+if [ ! -s /etc/wireguard/server_private.key ]; then
+    wg genkey > /etc/wireguard/server_private.key
 fi
 chmod 600 /etc/wireguard/server_private.key
+# Always derive this file so it cannot become stale or disagree with the key
+# actually loaded by WireGuard.
+wg pubkey < /etc/wireguard/server_private.key > /etc/wireguard/server_public.key
 
 SERVER_PRIV=$(cat /etc/wireguard/server_private.key)
 SERVER_PUB=$(cat /etc/wireguard/server_public.key)
