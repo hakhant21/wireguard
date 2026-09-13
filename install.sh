@@ -5,11 +5,11 @@ set -e
 echo "=== Wireguard + Xray Server Installer (LXC Compatible) with IPv6 ==="
 
 # Configuration variables
-WG_PORT=21821
-XRAY_PORT=10000
+WG_PORT="21821"
+XRAY_PORT="10000"
 WG_SUBNET="120.76.0.0/24"
 WG_NETWORK="120.76.0"
-WG6_SUBNET="fd00:120:76::/64"  # ULA IPv6 subnet
+WG6_SUBNET="fd00:120:76::/64"
 WG6_NETWORK="fd00:120:76"
 DB_DIR="/etc/wg-xray"
 BACKUP_DIR="/root/wireguard/wg-xray-backups"
@@ -17,6 +17,49 @@ UNINSTALL_SCRIPT="/usr/local/bin/wgx-uninstall"
 WGX_OWNER="${SUDO_USER:-root}"
 if ! id "$WGX_OWNER" >/dev/null 2>&1; then
     WGX_OWNER="root"
+fi
+
+prompt_value() {
+    local variable=$1 prompt=$2 default=$3 value
+    read -r -p "$prompt [$default]: " value
+    value=${value:-$default}
+    [ -n "$value" ] || { echo "Value cannot be empty." >&2; exit 1; }
+    printf -v "$variable" '%s' "$value"
+}
+
+prompt_port() {
+    local variable=$1 prompt=$2 default=$3 value
+    while true; do
+        read -r -p "$prompt [$default]: " value
+        value=${value:-$default}
+        if [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge 1 ] && [ "$value" -le 65535 ]; then
+            printf -v "$variable" '%s' "$value"
+            break
+        fi
+        echo "Enter a port number between 1 and 65535." >&2
+    done
+}
+
+echo "=== Configuration (press Enter to accept the default) ==="
+prompt_port WG_PORT "WireGuard UDP port" "$WG_PORT"
+prompt_port XRAY_PORT "Xray TCP port" "$XRAY_PORT"
+prompt_value WG_SUBNET "WireGuard IPv4 subnet" "$WG_SUBNET"
+prompt_value WG_NETWORK "WireGuard IPv4 network base" "$WG_NETWORK"
+prompt_value WG6_SUBNET "WireGuard IPv6 subnet" "$WG6_SUBNET"
+prompt_value WG6_NETWORK "WireGuard IPv6 network base" "$WG6_NETWORK"
+prompt_value DB_DIR "Database directory" "$DB_DIR"
+prompt_value BACKUP_DIR "Backup directory" "$BACKUP_DIR"
+prompt_value UNINSTALL_SCRIPT "Uninstall script path" "$UNINSTALL_SCRIPT"
+prompt_value WGX_OWNER "wgx owner" "$WGX_OWNER"
+if ! id "$WGX_OWNER" >/dev/null 2>&1; then
+    echo "User does not exist: $WGX_OWNER" >&2
+    exit 1
+fi
+WG_PREFIX=${WG_SUBNET#*/}
+WG6_PREFIX=${WG6_SUBNET#*/}
+if [ "$WG_PREFIX" = "$WG_SUBNET" ] || [ "$WG6_PREFIX" = "$WG6_SUBNET" ]; then
+    echo "Subnets must include a CIDR prefix, for example 10.99.0.0/24." >&2
+    exit 1
 fi
 
 # IPv6 detection
@@ -44,7 +87,7 @@ normalize_users_db() {
     [ -f "$db_file" ] || return 0
 
     tmp_file=$(mktemp)
-    awk -F',' 'BEGIN {OFS=","} NF >= 6 {print $1, $2, $3, $4, $6; next} NF == 5 {print $1, $2, $3, $4; next} {print}' "$db_file" > "$tmp_file"
+    awk -F',' 'BEGIN {OFS=","} NF >= 6 {print $1, $2, $3, $4, $6; next} NF == 5 {print $1, $2, $3, $4, $5; next} {print}' "$db_file" > "$tmp_file"
     cat "$tmp_file" > "$db_file"
     rm -f "$tmp_file"
 }
@@ -179,7 +222,11 @@ mkdir -p /etc/wireguard
 chmod 700 /etc/wireguard
 rm -f /etc/wireguard/wg0.conf 2>/dev/null
 
-wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
+# Keep the server identity stable when the installer is run again. Existing
+# client profiles cannot complete a handshake after the server key changes.
+if [ ! -s /etc/wireguard/server_private.key ] || [ ! -s /etc/wireguard/server_public.key ]; then
+    wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
+fi
 chmod 600 /etc/wireguard/server_private.key
 
 SERVER_PRIV=$(cat /etc/wireguard/server_private.key)
@@ -220,7 +267,7 @@ fi
 cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
 PrivateKey = $SERVER_PRIV
-Address = ${WG_NETWORK}.1/24, ${WG6_NETWORK}::1/64
+Address = ${WG_NETWORK}.1/$WG_PREFIX, ${WG6_NETWORK}::1/$WG6_PREFIX
 ListenPort = $WG_PORT
 MTU = 1420
 
@@ -230,6 +277,19 @@ PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2
 PostUp = sysctl -w net.ipv4.conf.$IFACE.rp_filter=2
 ${IPTABLES_RULES}${IPTABLES6_RULES}
 EOF
+
+# Restore registered peers when reinstalling without changing their keys.
+if [ -f "$DB_DIR/users.db" ]; then
+    while IFS=',' read -r user uuid ip ip6 pub rest; do
+        [ -n "$pub" ] || continue
+        cat >> /etc/wireguard/wg0.conf <<EOF
+
+[Peer]
+PublicKey = $pub
+AllowedIPs = $ip/32, $ip6/128
+EOF
+    done < "$DB_DIR/users.db"
+fi
 
 # Add Netbird routing if detected
 if [ "$NETBIRD_ACTIVE" = true ] && [ -n "$NETBIRD_INTERFACE" ]; then
@@ -573,17 +633,21 @@ echo "$(date)" > "$DB_DIR/.installed"
 # ========================
 # CLI TOOL with IPv6 support
 # ========================
-cat > /usr/local/bin/wgx <<'CLIEOF'
-#!/bin/bash
-
-DB="/etc/wg-xray/users.db"
-WG_CONF="/etc/wireguard/wg0.conf"
-XRAY_CONF="/usr/local/etc/xray/config.json"
-BACKUP_DIR="/root/wireguard/wg-xray-backups"
-WG_PORT="21821"
-XRAY_PORT="10000"
-WG_BASE="120.76.0"
-WG6_BASE="fd00:120:76"
+{
+    printf '#!/bin/bash\n'
+    printf 'DB=%q\n' "$DB_DIR/users.db"
+    printf 'WG_CONF=%q\n' "/etc/wireguard/wg0.conf"
+    printf 'XRAY_CONF=%q\n' "/usr/local/etc/xray/config.json"
+    printf 'XRAY_PUBLIC_KEY=%q\n' "$DB_DIR/xray_public.key"
+    printf 'BACKUP_DIR=%q\n' "$BACKUP_DIR"
+    printf 'WG_PORT=%q\n' "$WG_PORT"
+    printf 'XRAY_PORT=%q\n' "$XRAY_PORT"
+    printf 'WG_BASE=%q\n' "$WG_NETWORK"
+    printf 'WG6_BASE=%q\n' "$WG6_NETWORK"
+    printf 'WG_PREFIX=%q\n' "$WG_PREFIX"
+    printf 'WG6_PREFIX=%q\n' "$WG6_PREFIX"
+} > /usr/local/bin/wgx
+cat >> /usr/local/bin/wgx <<'CLIEOF'
 WG_DNS="1.1.1.1, 8.8.8.8"
 WG6_DNS="2606:4700:4700::1111, 2001:4860:4860::8888"
 
@@ -617,7 +681,7 @@ normalize_db() {
     [ -f "$DB" ] || return 0
 
     tmp=$(mktemp)
-    awk -F',' 'BEGIN {OFS=","} NF >= 6 {print $1, $2, $3, $4, $6; next} NF == 5 {print $1, $2, $3, $4; next} {print}' "$DB" > "$tmp"
+    awk -F',' 'BEGIN {OFS=","} NF >= 6 {print $1, $2, $3, $4, $6; next} NF == 5 {print $1, $2, $3, $4, $5; next} {print}' "$DB" > "$tmp"
     $USE_SUDO mv "$tmp" "$DB"
     $USE_SUDO chmod 644 "$DB"
 }
@@ -691,8 +755,8 @@ generate_qr() {
         SERVER_IP6=$(curl -6 -s ifconfig.me 2>/dev/null || echo "")
     fi
     
-    if [ -f "/etc/wg-xray/xray_public.key" ]; then
-        PUB_KEY=$(cat /etc/wg-xray/xray_public.key)
+    if [ -f "$XRAY_PUBLIC_KEY" ]; then
+        PUB_KEY=$(cat "$XRAY_PUBLIC_KEY")
     else
         PUB_KEY=""
     fi
@@ -754,6 +818,11 @@ AllowedIPs = $IP/32, $IP6/128
 EOC"
     
     $USE_SUDO systemctl restart wg-quick@wg0
+
+    if ! $USE_SUDO wg show wg0 peers | grep -qx "$PUB"; then
+        error "Peer was not loaded into wg0"
+        return 1
+    fi
     
     # Get server IPs
     SERVER_IP=$(curl -4 -s ifconfig.me 2>/dev/null || curl -s ifconfig.me)
@@ -769,7 +838,7 @@ EOC"
     $USE_SUDO tee "$BACKUP_DIR/wg-$USER.conf" > /dev/null <<EOC
 [Interface]
 PrivateKey = $PRIV
-Address = $IP/24, $IP6/64
+Address = $IP/$WG_PREFIX, $IP6/$WG6_PREFIX
 DNS = $WG_DNS, $WG6_DNS
 MTU = 1420
 
@@ -952,9 +1021,12 @@ fi
 # ========================
 # CREATE UNINSTALL SCRIPT
 # ========================
-cat > "$UNINSTALL_SCRIPT" <<'UNINSTALLEOF'
-#!/bin/bash
-
+{
+    printf '#!/bin/bash\n'
+    printf 'DB_DIR=%q\n' "$DB_DIR"
+    printf 'BACKUP_DIR=%q\n' "$BACKUP_DIR"
+} > "$UNINSTALL_SCRIPT"
+cat >> "$UNINSTALL_SCRIPT" <<'UNINSTALLEOF'
 echo "=== WireGuard + Xray Uninstaller ==="
 read -p "Are you sure? (y/N): " -n 1 -r
 echo
@@ -963,7 +1035,7 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
 fi
 
 BACKUP_FILE="/tmp/wg-xray-final-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-tar -czf "$BACKUP_FILE" /etc/wireguard /usr/local/etc/xray /etc/wg-xray 2>/dev/null || true
+tar -czf "$BACKUP_FILE" /etc/wireguard /usr/local/etc/xray "$DB_DIR" 2>/dev/null || true
 echo "✓ Backup saved to $BACKUP_FILE"
 
 systemctl stop wg-quick@wg0 2>/dev/null
@@ -976,8 +1048,8 @@ rm -rf /etc/wireguard
 rm -rf /usr/local/etc/xray
 rm -rf /usr/local/share/xray
 rm -rf /var/log/xray
-rm -rf /etc/wg-xray
-rm -rf /root/wireguard/wg-xray-backups
+rm -rf "$DB_DIR"
+rm -rf "$BACKUP_DIR"
 rm -f /usr/local/bin/wgx
 rm -f /usr/local/bin/xray
 rm -f /etc/sudoers.d/wgx
