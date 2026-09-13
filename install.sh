@@ -101,16 +101,16 @@ echo "Detected outbound interface: $IFACE"
 # ========================
 if [ "$IS_LXC" = true ]; then
     echo "=== Applying LXC-specific fixes ==="
-    
+
     sysctl -w net.ipv4.conf.all.rp_filter=2
     sysctl -w net.ipv4.conf.default.rp_filter=2
     sysctl -w net.ipv4.conf.$IFACE.rp_filter=2
-    
+
     append_if_missing "# WireGuard LXC fixes" /etc/sysctl.conf
     append_if_missing "net.ipv4.conf.all.rp_filter=2" /etc/sysctl.conf
     append_if_missing "net.ipv4.conf.default.rp_filter=2" /etc/sysctl.conf
     append_if_missing "net.ipv4.conf.$IFACE.rp_filter=2" /etc/sysctl.conf
-    
+
     echo "✓ rp_filter set to loose mode"
 fi
 
@@ -123,13 +123,13 @@ NETBIRD_INTERFACE=""
 if command -v docker &>/dev/null && docker ps --format "table {{.Names}}" 2>/dev/null | grep -q "netbird"; then
     echo "✓ Netbird Docker container detected"
     NETBIRD_ACTIVE=true
-    
+
     if ip link show | grep -q "netbird"; then
         NETBIRD_INTERFACE="netbird"
     elif ip link show | grep -q "wt0"; then
         NETBIRD_INTERFACE="wt0"
     fi
-    
+
     if [ -n "$NETBIRD_INTERFACE" ]; then
         echo "✓ Netbird interface: $NETBIRD_INTERFACE"
     fi
@@ -160,6 +160,9 @@ ufw default allow outgoing
 ufw allow ssh
 ufw allow "$WG_PORT"/udp
 ufw allow "$XRAY_PORT"/tcp
+ufw allow in on wg0
+ufw route allow in on wg0 out on "$IFACE"
+ufw route allow in on "$IFACE" out on wg0
 
 sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/g' /etc/default/ufw 2>/dev/null || true
 ufw --force reload
@@ -267,14 +270,14 @@ if systemctl is-active --quiet wg-quick@wg0; then
 else
     echo "⚠️ WireGuard failed to start. Checking logs..."
     journalctl -u wg-quick@wg0 -n 20 --no-pager
-    
+
     echo ""
     echo "Attempting to fix common issues..."
 
     echo "Retrying with existing IPv4 configuration..."
     systemctl restart wg-quick@wg0
     sleep 2
-    
+
     if systemctl is-active --quiet wg-quick@wg0; then
         echo "✓ WireGuard running after retry"
     else
@@ -315,42 +318,42 @@ fi
 # Method 2: Manual installation if official script fails
 if [ "$XRAY_INSTALL_SUCCESS" = false ]; then
     echo "=== Performing manual Xray installation ==="
-    
+
     # Detect architecture
     ARCH=$(uname -m)
     case $ARCH in
         x86_64)  XRAY_ARCH="linux-64" ;;
         aarch64) XRAY_ARCH="linux-arm64-v8a" ;;
         armv7l)  XRAY_ARCH="linux-arm32-v7a" ;;
-        *)       
+        *)
             echo "Unsupported architecture: $ARCH"
             echo "Attempting linux-64 as fallback..."
             XRAY_ARCH="linux-64"
             ;;
     esac
-    
+
     # Download Xray
     XRAY_VERSION=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -o '"tag_name": "[^"]*' | grep -o '[^"]*$')
     if [ -z "$XRAY_VERSION" ]; then
         XRAY_VERSION="v1.8.21"
         echo "Using default version: $XRAY_VERSION"
     fi
-    
+
     DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-${XRAY_ARCH}.zip"
     echo "Downloading Xray from: $DOWNLOAD_URL"
-    
+
     cd /tmp
     if wget -O xray.zip "$DOWNLOAD_URL"; then
         unzip -o xray.zip
-        
+
         mkdir -p /usr/local/bin
         cp xray /usr/local/bin/xray
         chmod +x /usr/local/bin/xray
-        
+
         mkdir -p /usr/local/etc/xray
         mkdir -p /usr/local/share/xray
         cp geoip.dat geosite.dat /usr/local/share/xray/ 2>/dev/null || true
-        
+
         # Create systemd service
         cat > /etc/systemd/system/xray.service <<'SERVICEEOF'
 [Unit]
@@ -372,14 +375,14 @@ LimitNOFILE=1000000
 [Install]
 WantedBy=multi-user.target
 SERVICEEOF
-        
+
         systemctl daemon-reload
         echo "✓ Xray installed manually"
     else
         echo "✗ Failed to download Xray"
         exit 1
     fi
-    
+
     cd - > /dev/null
 fi
 
@@ -580,7 +583,7 @@ echo "$(date)" > "$DB_DIR/.installed"
     printf 'WG_PREFIX=%q\n' "$WG_PREFIX"
 } > /usr/local/bin/wgx
 cat >> /usr/local/bin/wgx <<'CLIEOF'
-WG_DNS="1.1.1.1, 8.8.8.8"
+WG_DNS="8.8.8.8, 9.9.9.9"
 
 USE_SUDO=""
 if [ "$EUID" -ne 0 ]; then
@@ -640,16 +643,16 @@ sync_xray() {
         $USE_SUDO touch "$DB"
         $USE_SUDO chmod 644 "$DB"
     fi
-    
+
     CLIENTS=$(awk -F',' '{printf "{\"id\":\"%s\"},",$2}' "$DB" 2>/dev/null | sed 's/,$//')
-    
+
     if [ -z "$CLIENTS" ]; then
         CLIENTS=""
     fi
-    
+
     $USE_SUDO jq ".inbounds[0].settings.clients = [ $CLIENTS ]" "$XRAY_CONF" > /tmp/xray.json
     $USE_SUDO mv /tmp/xray.json "$XRAY_CONF"
-    
+
     if systemctl is-active --quiet xray 2>/dev/null; then
         $USE_SUDO systemctl restart xray
     fi
@@ -659,24 +662,24 @@ sync_xray() {
 generate_qr() {
     USER=$1
     UUID=$2
-    
+
     # Get server IPs
     SERVER_IP=$(curl -4 -s ifconfig.me 2>/dev/null || curl -s ifconfig.me)
-    
+
     if [ -f "$XRAY_PUBLIC_KEY" ]; then
         PUB_KEY=$(cat "$XRAY_PUBLIC_KEY")
     else
         PUB_KEY=""
     fi
-    
+
     # Xray link (IPv4)
     XRAY_LINK="vless://$UUID@$SERVER_IP:$XRAY_PORT?type=grpc&security=reality&serviceName=grpc&pbk=$PUB_KEY&sni=www.google.com#$USER"
-    
+
     echo ""
     echo -e "${GREEN}===== XRAY LINK (IPv4) =====${NC}"
     echo "$XRAY_LINK"
     qrencode -t ansiutf8 -s 2 -m 1 "$XRAY_LINK" 2>/dev/null || echo "QR code generation failed"
-    
+
     echo ""
     echo -e "${GREEN}===== WG QR =====${NC}"
     if [ -f "$BACKUP_DIR/wg-$USER.conf" ]; then
@@ -686,44 +689,44 @@ generate_qr() {
 
 add_user() {
     USER=$1
-    
+
     if [ -z "$USER" ]; then
         error "Username required"
         echo "Usage: wgx add USERNAME"
         return 1
     fi
-    
+
     if [ -f "$DB" ] && grep -q "^$USER," "$DB"; then
         error "User $USER already exists"
         return 1
     fi
-    
+
     IP=$(get_next_ip)
     WG_KEY=$($USE_SUDO wg genkey)
     PRIV="$WG_KEY"
     PUB=$(echo "$WG_KEY" | $USE_SUDO wg pubkey)
     UUID=$(cat /proc/sys/kernel/random/uuid)
-    
+
     $USE_SUDO bash -c "echo \"$USER,$UUID,$IP,$PUB\" >> \"$DB\""
-    
+
     $USE_SUDO bash -c "cat >> \"$WG_CONF\" <<EOC
 
 [Peer]
 PublicKey = $PUB
 AllowedIPs = $IP/32
 EOC"
-    
+
     $USE_SUDO systemctl restart wg-quick@wg0
 
     if ! $USE_SUDO wg show wg0 peers | grep -qx "$PUB"; then
         error "Peer was not loaded into wg0"
         return 1
     fi
-    
+
     # Get server IPs
     SERVER_IP=$(curl -4 -s ifconfig.me 2>/dev/null || curl -s ifconfig.me)
     SERVER_PUB=$($USE_SUDO cat /etc/wireguard/server_public.key)
-    
+
     $USE_SUDO mkdir -p "$BACKUP_DIR"
 
     $USE_SUDO tee "$BACKUP_DIR/wg-$USER.conf" > /dev/null <<EOC
@@ -739,50 +742,50 @@ Endpoint = $SERVER_IP:$WG_PORT
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOC
-    
+
     sync_xray
     backup_configs "$USER"
-    
+
     echo ""
     echo -e "${GREEN}=== USER CREATED ===${NC}"
     echo "Username: $USER"
     echo "IPv4: $IP"
     echo "UUID: $UUID"
     echo "WG Config: $BACKUP_DIR/wg-$USER.conf"
-    
+
     generate_qr "$USER" "$UUID"
 }
 
 remove_user() {
     USER=$1
-    
+
     if [ -z "$USER" ]; then
         error "Username required"
         echo "Usage: wgx remove USERNAME"
         return 1
     fi
-    
+
     if [ ! -f "$DB" ]; then
         error "No users found"
         return 1
     fi
-    
+
     line=$(grep "^$USER," "$DB")
     if [ -z "$line" ]; then
         error "User $USER not found"
         return 1
     fi
-    
+
     $USE_SUDO sed -i "/^$USER,/d" "$DB"
-    
+
     TMP=$(mktemp)
-    
+
     $USE_SUDO awk '
     BEGIN {keep=1}
     /^\[Peer\]/ {keep=0}
     keep {print}
     ' "$WG_CONF" > "$TMP"
-    
+
     while IFS=',' read -r u uuid ip pub rest; do
         [ -z "$u" ] && continue
         echo "" >> "$TMP"
@@ -790,14 +793,14 @@ remove_user() {
         echo "PublicKey = $pub" >> "$TMP"
         echo "AllowedIPs = $ip/32" >> "$TMP"
     done < "$DB"
-    
+
     $USE_SUDO mv "$TMP" "$WG_CONF"
-    
+
     $USE_SUDO systemctl restart wg-quick@wg0
     sync_xray
-    
+
     $USE_SUDO rm -f "$BACKUP_DIR/wg-$USER.conf" "$BACKUP_DIR/$USER-xray-link.txt" 2>/dev/null
-    
+
     echo -e "${GREEN}User removed: $USER${NC}"
 }
 
@@ -806,10 +809,10 @@ list_users() {
         echo "No users found"
         return
     fi
-    
+
     printf "%-15s %-36s %-16s\n" "USERNAME" "UUID" "IPv4"
     echo "------------------------------------------------------------------"
-    
+
     while IFS=',' read -r user uuid ip pub rest; do
         printf "%-15s %-36s %-16s\n" "$user" "$uuid" "$ip"
     done < "$DB"
@@ -817,31 +820,31 @@ list_users() {
 
 show_user() {
     USER=$1
-    
+
     if [ -z "$USER" ]; then
         error "Username required"
         return 1
     fi
-    
+
     if [ ! -f "$DB" ]; then
         error "No users found"
         return 1
     fi
-    
+
     line=$(grep "^$USER," "$DB")
     if [ -z "$line" ]; then
         error "User $USER not found"
         return 1
     fi
-    
+
     IFS=',' read -r user uuid ip pub rest <<< "$line"
-    
+
     echo -e "${GREEN}User Details:${NC}"
     echo "Username: $user"
     echo "UUID: $uuid"
     echo "IPv4: $ip"
     echo "Public Key: $pub"
-    
+
     if [ -f "$BACKUP_DIR/wg-$user.conf" ]; then
         echo ""
         echo "WireGuard Configuration:"
